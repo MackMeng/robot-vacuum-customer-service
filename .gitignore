@@ -23,7 +23,11 @@ env/
 # Generated artifacts (rebuildable from data/ via `python -m rag.vector_store`)
 chroma_db/
 logs/
-md5.text
+md5*.text
+evals/results/
+
+# Session storage (user chat data, do not commit)
+data/sessions.db*
 
 # Streamlit
 .streamlit/secrets.toml

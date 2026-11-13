@@ -1,8 +1,10 @@
-collection_name: agent
+collection_name: agent_v2   # 嵌入模型升级后向量空间不兼容,用新集合重建知识库
 persist_directory: chroma_db
-k: 3
+k: 10                # 粗召回数量,交给 rerank 精排
+rerank_top_n: 3      # rerank 后最终保留的文档数
+rerank_model_name: qwen3.7-text-rerank   # 精排模型
 data_path: data
-md5_hex_store: md5.text   #记录已被处理过的文档的md5值
+md5_hex_store: md5_v2.text   #记录已被处理过的文档的md5值(新集合配套新记录)
 allowed_knowledge_file_types: [".pdf",".txt"]
 
 #splitter: RecursiveCharacterTextSplitter

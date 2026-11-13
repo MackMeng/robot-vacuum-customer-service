@@ -1,2 +1,4 @@
-chat_model_name: qwen-max
-embedding_model_name: text-embedding-v4
+chat_model_name: qwen3.7-plus
+embedding_model_name: qwen3.7-text-embedding
+# 新一代千问模型仅支持OpenAI兼容端点,聊天模型需通过此地址调用
+chat_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1

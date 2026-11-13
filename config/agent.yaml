@@ -1,1 +1,3 @@
 external_data_path: data/external/records.csv
+# 会话存储数据库文件路径（SQLite）
+session_db_path: data/sessions.db

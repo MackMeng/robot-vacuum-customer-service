@@ -1,4 +1,4 @@
-#========================智能客服工具模块========================
+# ========================智能客服工具模块========================
 """
 agent工具调用模块：
     7个工具函数：
@@ -19,33 +19,63 @@ from utils.cofig_handler import agent_conf
 from utils.logger_handler import logger
 from utils.path_tool import get_abspath
 
-user_ids=["1001","1002","1003","1004","1005","1006","1007","1008","1009","1010",]
-month_arr=["2025-01","2025-02","2025-03","2025-04","2025-05","2025-06","2025-07","2025-08","2025-09","2025-10","2025-11","2025-12"]
-external_data={}
-current_city=None
+user_ids = [
+    "1001",
+    "1002",
+    "1003",
+    "1004",
+    "1005",
+    "1006",
+    "1007",
+    "1008",
+    "1009",
+    "1010",
+]
+month_arr = [
+    "2025-01",
+    "2025-02",
+    "2025-03",
+    "2025-04",
+    "2025-05",
+    "2025-06",
+    "2025-07",
+    "2025-08",
+    "2025-09",
+    "2025-10",
+    "2025-11",
+    "2025-12",
+]
+external_data = {}
+current_city = None
+
 
 @tool(description="从向量存储中检索参考资料")
-def rag_summarize(query:str)->str:
+def rag_summarize(query: str) -> str:
     return RagSummarizeService().rag_summarize(query)
+
 
 # 以下 get_weather/get_city_name/get_user_id/get_current_month 为演示用模拟数据（固定或随机返回），非真实查询
 @tool(description="获取指定城市的天气，以消息字符串的形式返回")
-def get_weather(city:str)->str:
+def get_weather(city: str) -> str:
     return f"{city}的天气为晴天，气温为25摄氏度，空气湿度为60%，南风1级，AQI21，最近6小时无雨"
 
+
 @tool(description="获取用户所在城市的名称，以字符串的形式返回")
-def get_city_name()->str:
-    return random.choice(["深圳","合肥","杭州"])
+def get_city_name() -> str:
+    return random.choice(["深圳", "合肥", "杭州"])
+
 
 @tool(description="获取用户id，以字符串的形式返回")
-def get_user_id()->str:
+def get_user_id() -> str:
     return random.choice(user_ids)
 
+
 @tool(description="获取当前月份，以字符串的形式返回")
-def get_current_month()->str:
+def get_current_month() -> str:
     return random.choice(month_arr)
 
-def generate_external_data()-> dict:
+
+def generate_external_data() -> dict:
     """
     {
         "user_id":{
@@ -55,43 +85,52 @@ def generate_external_data()-> dict:
     :return:
     """
     if not external_data:
-        external_data_path= get_abspath(agent_conf["external_data_path"])
+        external_data_path = get_abspath(agent_conf["external_data_path"])
         if not os.path.exists(external_data_path):
             raise FileNotFoundError(f"外部数据文件{external_data_path}不存在")
 
-        with open(external_data_path,"r",encoding="utf-8") as f:
-            for line in f.readlines()[1:]:      # 跳过第一行
-                arr:list[str]=line.strip().split(",")   #strip（）去掉首尾空格，split（）根据逗号分隔
-                user_id:str=arr[0].replace('"',"")      #replace（）去掉双引号
-                feature:str=arr[1].replace('"',"")
-                efficiency:str=arr[2].replace('"',"")
-                consumables:str=arr[3].replace('"',"")
-                time:str=arr[4].replace('"',"")
-                comparison:str=arr[5].replace('"',"")
+        with open(external_data_path, "r", encoding="utf-8") as f:
+            for line in f.readlines()[1:]:  # 跳过第一行
+                arr: list[str] = line.strip().split(
+                    ","
+                )  # strip（）去掉首尾空格，split（）根据逗号分隔
+                user_id: str = arr[0].replace('"', "")  # replace（）去掉双引号
+                feature: str = arr[1].replace('"', "")
+                efficiency: str = arr[2].replace('"', "")
+                consumables: str = arr[3].replace('"', "")
+                time: str = arr[4].replace('"', "")
+                comparison: str = arr[5].replace('"', "")
 
                 if user_id not in external_data:
-                    external_data[user_id]={}
-                external_data[user_id][time]={
-                    "特征":feature,
-                    "效率":efficiency,
-                    "消耗品":consumables,
-                    "比较":comparison,
+                    external_data[user_id] = {}
+                external_data[user_id][time] = {
+                    "特征": feature,
+                    "效率": efficiency,
+                    "消耗品": consumables,
+                    "比较": comparison,
                 }
     return external_data
 
+
 @tool(description="从外部系统中，获取指定用户在指定月份的使用记录，以字符串的形式返回")
-def fetch_external_data(user_id:str,month:str)->dict:
+def fetch_external_data(user_id: str, month: str) -> dict:
     generate_external_data()
 
     try:
         return external_data[user_id][month]
     except KeyError:
-        logger.warning(f"[fetch_external_data] 未能检索到用户：{user_id}在{month}的使用记录")
+        logger.warning(
+            f"[fetch_external_data] 未能检索到用户：{user_id}在{month}的使用记录"
+        )
         return {}
 
-@tool(description="无入参，无返回值，调用后触发中间件自动为报告生成的场景动态注入上下文信息，为后续提示词切换上下文信息")
+
+@tool(
+    description="无入参，无返回值，调用后触发中间件自动为报告生成的场景动态注入上下文信息，为后续提示词切换上下文信息"
+)
 def fill_context_for_report():
     return "fill_context_for_report已调用"
 
+
 if __name__ == "__main__":
-    print(fetch_external_data("1001","2025-02"))
+    print(fetch_external_data("1001", "2025-02"))

@@ -1,0 +1,13 @@
+# 项目统一配置：工具规则 + 基本元数据（运行时依赖见 requirements.txt）
+[project]
+name = "robot-vacuum-customer-service"
+version = "0.1.0"
+description = "基于 LangChain ReAct Agent + RAG 的扫地机器人智能客服系统"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "MackMeng" }]
+
+[tool.black]
+line-length = 88
+target-version = ["py313"]

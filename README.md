@@ -24,22 +24,27 @@
 - **ReAct 自主决策**：由大模型动态决定是否调用工具、调用哪个工具、是否继续迭代，而非写死的固定流程。
 - **中间件增强**：工具调用监控日志、模型调用前日志，以及**报告场景下的提示词动态切换**。
 - **增量知识库**：基于 MD5 去重，仅加载新增/变更文档，避免重复嵌入。
-- **流式交互**：Streamlit 聊天界面，逐字符流式输出，会话历史保持。
+- **两段式检索**：向量粗召回 top-k + DashScope rerank 精排 top-n，提升参考资料相关性。
+- **多轮会话管理**：基于 SQLite 持久化会话，侧边栏支持**新建 / 加载历史 / 删除（二次确认）**；将既往对话作为上下文传入 Agent，并以**滑动窗口截断**控制上下文长度，实现真正的多轮记忆。
+- **流式交互**：Streamlit 聊天界面，逐字符流式输出。
 
 ## 系统架构
 
 ```mermaid
 flowchart TD
     User[用户] -->|提问| UI["Streamlit 界面<br/>app.py"]
-    UI -->|execute_stream| Agent["ReactAgent<br/>react_agent.py"]
+    UI -->|execute_stream query+history| Agent["ReactAgent<br/>react_agent.py"]
+    UI -->|新建/加载/删除| Store["会话存储<br/>utils/session_store.py"]
+    Store --> DB["SQLite<br/>data/sessions.db"]
     Agent --> Core["LangChain create_agent"]
-    Core --> Model["ChatTongyi<br/>qwen-max"]
+    Core --> Model["ChatOpenAI<br/>qwen3.7-plus"]
     Core --> MW["中间件<br/>monitor_tool / log_before_model / report_prompt_switch"]
     Core --> Tools["7 个工具"]
     Tools --> RAG["rag_summarize"]
     Tools --> Env["get_city_name / get_weather"]
     Tools --> Rep["get_user_id / get_current_month<br/>fetch_external_data / fill_context_for_report"]
-    RAG --> VS["Chroma 向量库"]
+    RAG --> VS["Chroma 向量库<br/>粗召回 top-k"]
+    RAG --> RR["DashScope Rerank<br/>精排 top-n"]
     VS --> Emb["DashScope Embeddings"]
     Rep --> CSV["外部使用记录<br/>data/external/records.csv"]
 ```
@@ -69,10 +74,12 @@ sequenceDiagram
 | 领域 | 选型 |
 |---|---|
 | 智能体框架 | LangChain 1.4 `create_agent` + LangGraph |
-| 大语言模型 | 通义千问 `qwen-max`（阿里云百炼 DashScope） |
-| 嵌入模型 | DashScope `text-embedding-v4` |
+| 大语言模型 | 通义千问 `qwen3.7-plus`（阿里云百炼，OpenAI 兼容端点 + `langchain-openai`） |
+| 嵌入模型 | DashScope `qwen3.7-text-embedding` |
+| 精排模型 | DashScope `qwen3.7-text-rerank` |
 | 向量数据库 | Chroma |
-| 检索增强 | RecursiveCharacterTextSplitter + Retriever + 总结链 |
+| 检索增强 | RecursiveCharacterTextSplitter + 粗召回 Retriever + rerank 精排 + 总结链 |
+| 会话存储 | SQLite（标准库 `sqlite3`，零额外依赖） |
 | Web 界面 | Streamlit |
 | 配置/提示词 | YAML 配置 + 独立提示词模板文件 |
 
@@ -80,26 +87,28 @@ sequenceDiagram
 
 ```
 robot-vacuum-customer-service/
-├── app.py                      # Streamlit 入口，聊天界面与流式输出
+├── app.py                      # Streamlit 入口，聊天界面、会话侧边栏与流式输出
 ├── agent/
-│   ├── react_agent.py          # ReactAgent：装配模型/工具/中间件，流式执行
+│   ├── react_agent.py          # ReactAgent：装配模型/工具/中间件，流式执行（支持多轮历史）
 │   └── tools/
 │       ├── agent_tools.py      # 7 个工具函数
 │       └── middleware.py       # 3 个中间件（监控/日志/提示词切换）
 ├── model/
 │   └── factory.py              # 模型工厂：ChatModel + EmbeddingModel
 ├── rag/
-│   ├── rag_service.py          # 检索 + 总结服务
+│   ├── rag_service.py          # 粗召回 + rerank 精排 + 总结服务
 │   └── vector_store.py         # Chroma 向量库，MD5 增量加载文档
 ├── utils/
 │   ├── cofig_handler.py        # YAML 配置加载
 │   ├── prompt_loader.py        # 提示词加载
 │   ├── file_handler.py         # PDF/TXT 加载、MD5、目录遍历
 │   ├── logger_handler.py       # 统一日志
-│   └── path_tool.py            # 项目绝对路径工具
+│   ├── path_tool.py            # 项目绝对路径工具
+│   └── session_store.py        # SQLite 会话持久化（新建/加载/删除）
 ├── config/                     # YAML 配置（agent/rag/chroma/prompts）
 ├── prompts/                    # 提示词模板（主/RAG/报告）
-├── data/                       # 知识库源文件（txt/pdf）+ 外部使用记录 csv
+├── evals/                      # 离线测评：dataset.jsonl 标注集 + run_eval.py，报告存 results/
+├── data/                       # 知识库源文件（txt/pdf）+ 外部记录 csv + 会话库 sessions.db
 ├── docs/                       # 设计文档
 ├── requirements.txt
 ├── .env.example
@@ -107,7 +116,7 @@ robot-vacuum-customer-service/
 └── README.md
 ```
 
-> `chroma_db/`（向量库）、`logs/`（日志）、`md5.text`（去重记录）为运行时生成的产物，已在 `.gitignore` 中忽略，可通过下方步骤从 `data/` 重建。
+> `chroma_db/`（向量库）、`logs/`（日志）、`md5_v2.text`（去重记录）、`data/sessions.db`（会话库）为运行时生成的产物，已在 `.gitignore` 中忽略；向量库可通过下方步骤从 `data/` 重建。
 
 ## 快速开始
 
@@ -146,7 +155,7 @@ python -m rag.vector_store
 streamlit run app.py
 ```
 
-启动后浏览器访问 `http://localhost:8501` 即可对话。
+启动后浏览器访问 `http://localhost:8501` 即可对话。左侧边栏可**新建会话、加载历史对话、删除会话**（删除需二次确认）；对话自动持久化到本地 SQLite，刷新或重启后仍可加载，无需额外安装数据库服务。
 
 > 提示：项目使用绝对导入且未包含 `__init__.py`，请在**项目根目录**运行；子模块用 `python -m rag.vector_store` 的模块方式执行，不要直接 `python rag/vector_store.py`。
 
@@ -156,12 +165,26 @@ streamlit run app.py
 
 | 文件 | 关键项 | 说明 |
 |---|---|---|
-| `rag.yaml` | `chat_model_name` / `embedding_model_name` | 聊天与嵌入模型 ID |
-| `chroma.yaml` | `collection_name` / `k` / `chunksize` / `chunk_overlap` / `separators` | 向量库、检索数量与分块策略 |
+| `rag.yaml` | `chat_model_name` / `embedding_model_name` / `chat_base_url` | 聊天与嵌入模型 ID、聊天模型兼容端点 |
+| `chroma.yaml` | `collection_name` / `k` / `rerank_top_n` / `rerank_model_name` / `chunksize` / `chunk_overlap` / `separators` | 向量库、粗召回/精排数量、精排模型与分块策略 |
 | `prompts.yaml` | `*_prompt_path` | 三套提示词模板的相对路径 |
-| `agent.yaml` | `external_data_path` | 外部使用记录 CSV 路径 |
+| `agent.yaml` | `external_data_path` / `session_db_path` | 外部使用记录 CSV 路径 / 会话 SQLite 库路径 |
 
 修改知识库：将新的 `.txt` / `.pdf` 放入 `data/`，重新运行 `python -m rag.vector_store` 即可增量入库（已处理文档按 MD5 跳过）。
+
+## 离线测评（evals）
+
+`evals/` 提供轻量离线测评，量化检索与回答质量，不引入额外评估框架：
+
+```bash
+python -m evals.run_eval                # 检索质量：关键词召回率 + 期望来源命中率（rerank 精排）
+python -m evals.run_eval --no-rerank    # 基线对照：粗召回截断 top_n，量化 rerank 贡献
+python -m evals.run_eval --with-answer  # 额外评估答案关键词覆盖率（多耗 API 调用）
+```
+
+- 标注集 `evals/dataset.jsonl`：每行一个用例（`query` / `keywords` / `source`），随代码进版本库，改知识库时同步维护；
+- 报告带时间戳存入 `evals/results/`（已 gitignore），便于历次纵向对比；
+- 纪律：换模型、调 `k`/分块、改提示词后重跑对照，指标不回退再上线。
 
 ## 使用示例
 
@@ -170,6 +193,7 @@ streamlit run app.py
 | 选购咨询 | 「小户型适合哪些扫地机器人？」 | `rag_summarize` 检索知识库 |
 | 环境适配 | 「我所在地区的气温下该如何保养？」 | `get_city_name` → `get_weather` → 综合作答 |
 | 使用报告 | 「生成我的使用报告」 | `fill_context_for_report` → 提示词切换 → `fetch_external_data` |
+| 多轮追问 | 「（承接上文）那适合养宠家庭吗？」 | 既往对话作为上下文传入 Agent |
 
 ## 说明与已知限制
 
@@ -179,14 +203,16 @@ streamlit run app.py
 - `get_city_name` / `get_user_id` / `get_current_month`：随机返回演示值；
 - `fetch_external_data`：读取本地 `records.csv` 演示数据。
 
-此外，当前版本无用户鉴权、会话仅存于单次 Streamlit 运行内存中，API Key 通过环境变量读取（未内置 `.env` 自动加载）。
+此外，当前版本面向单机单用户、无鉴权；会话已持久化到本地 SQLite（`data/sessions.db`），支持跨刷新/重启加载；API Key 通过环境变量读取（未内置 `.env` 自动加载）。
 
 ## 后续规划
 
 - [ ] 接入真实天气 API 与用户/设备系统
-- [ ] `.env` 自动加载与多用户会话持久化
+- [ ] `.env` 自动加载、多用户隔离与鉴权
 - [ ] 单元测试与 CI
-- [ ] 检索重排（rerank）与答案引用溯源
+- [x] 检索重排（rerank）
+- [x] 离线测评（evals：检索 A/B 对照 + 答案覆盖率）
+- [ ] 答案引用溯源
 
 ## 许可证
 
