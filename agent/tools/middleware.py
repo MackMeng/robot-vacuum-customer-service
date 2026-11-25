@@ -1,10 +1,9 @@
 # ================中间件模块================
 """
-进行工具执行的监控：
-    3个中间件函数：
+进行工具执行与模型调用的监控：
+    2个中间件函数：
         1. monitor_tool: 工具执行过程监控
         2. log_before_model: 模型执行前输出日志
-        3. report_prompt_switch: 动态切换提示词
 
 """
 
@@ -13,15 +12,12 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import (
     wrap_tool_call,
     before_model,
-    dynamic_prompt,
-    ModelRequest,
 )
 from langchain.tools.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 from langchain_core.messages import ToolMessage
 from utils.logger_handler import logger
-from utils.prompt_loader import load_report_prompt, load_system_prompt
 
 
 # 工具执行的监控
@@ -41,9 +37,6 @@ def monitor_tool(
     try:
         result = handler(request)
         logger.info(f"[monitor tool]工具{request.tool_call['name']}调用成功")
-        # 只要模型调用【fill_context_for_report】工具，就将【report】字段设置为True
-        if request.tool_call["name"] == "fill_context_for_report":
-            request.runtime.context["report"] = True
         return result
     except Exception as e:
         logger.error(
@@ -65,13 +58,3 @@ def log_before_model(state: AgentState, runtime: Runtime):
         f"[log before model]{type(state['messages'][-1]).__name__}|{state['messages'][-1].content.strip()}"
     )
     return None
-
-
-@dynamic_prompt
-# 动态切换提示词
-def report_prompt_switch(request: ModelRequest):
-    is_report = request.runtime.context.get("report", False)
-    if is_report:  # 是报告生成的场景，返回报告提示词
-        print("*" * 30)
-        return load_report_prompt()
-    return load_system_prompt()

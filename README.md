@@ -22,51 +22,65 @@
 - **智能问答**：处理购买前咨询（功能、价格、对比）与购买后问题（操作、故障、维护），基于 RAG 从知识库检索准确信息作答。
 - **使用报告生成**：分析用户使用记录（清洁效率、耗材状态、对比数据），生成个性化 Markdown 报告与优化建议。
 - **ReAct 自主决策**：由大模型动态决定是否调用工具、调用哪个工具、是否继续迭代，而非写死的固定流程。
-- **中间件增强**：工具调用监控日志、模型调用前日志，以及**报告场景下的提示词动态切换**。
+- **中间件增强**：工具调用监控日志、模型调用前日志。
+- **MCP 天气服务**：天气查询通过独立 MCP Server（stdio）接入，数据来自 Open-Meteo（免 Key），Agent 经 MCP 客户端调用真实天气。
 - **增量知识库**：基于 MD5 去重，仅加载新增/变更文档，避免重复嵌入。
 - **两段式检索**：向量粗召回 top-k + DashScope rerank 精排 top-n，提升参考资料相关性。
 - **多轮会话管理**：基于 SQLite 持久化会话，侧边栏支持**新建 / 加载历史 / 删除（二次确认）**；将既往对话作为上下文传入 Agent，并以**滑动窗口截断**控制上下文长度，实现真正的多轮记忆。
 - **流式交互**：Streamlit 聊天界面，逐字符流式输出。
+- **接口化交付**：FastAPI 提供 `POST /chat`（SSE 流式）与会话 CRUD 接口，附 Dockerfile / docker-compose，一键起 API 与 UI。
 
 ## 系统架构
 
 ```mermaid
 flowchart TD
     User[用户] -->|提问| UI["Streamlit 界面<br/>app.py"]
+    User -->|HTTP + SSE| API["FastAPI<br/>api.py"]
+    DC["Docker Compose<br/>ui:8501 / api:8000"] --> UI
+    DC --> API
     UI -->|execute_stream query+history| Agent["ReactAgent<br/>react_agent.py"]
+    API -->|execute_stream query+history| Agent
     UI -->|新建/加载/删除| Store["会话存储<br/>utils/session_store.py"]
+    API -->|会话读写| Store
     Store --> DB["SQLite<br/>data/sessions.db"]
     Agent --> Core["LangChain create_agent"]
     Core --> Model["ChatOpenAI<br/>qwen3.7-plus"]
-    Core --> MW["中间件<br/>monitor_tool / log_before_model / report_prompt_switch"]
-    Core --> Tools["7 个工具"]
+    Core --> MW["中间件<br/>monitor_tool / log_before_model"]
+    Core --> Tools["4 个对外工具"]
     Tools --> RAG["rag_summarize"]
-    Tools --> Env["get_city_name / get_weather"]
-    Tools --> Rep["get_user_id / get_current_month<br/>fetch_external_data / fill_context_for_report"]
+    Tools --> City["get_city_name"]
+    Tools --> Rep["generate_usage_report"]
     RAG --> VS["Chroma 向量库<br/>粗召回 top-k"]
     RAG --> RR["DashScope Rerank<br/>精排 top-n"]
     VS --> Emb["DashScope Embeddings"]
-    Rep --> CSV["外部使用记录<br/>data/external/records.csv"]
+    Rep --> RG["报告子图 StateGraph<br/>report_graph.py"]
+    RG --> CSV["外部使用记录<br/>data/external/records.csv"]
+    Tools -->|MCP stdio| MC["MCP 客户端<br/>utils/mcp_client.py"]
+    MC --> WX["MCP 天气服务<br/>mcp_server/weather_server.py"]
+    WX --> OM["Open-Meteo API<br/>免 Key"]
 ```
 
 ## 核心工作流程
 
-报告生成场景通过中间件实现「问答人格」与「报告人格」的解耦：模型调用 `fill_context_for_report` 后，`monitor_tool` 将运行时上下文 `report` 置为 `True`，`@dynamic_prompt` 中间件在下一次模型调用前自动切换到报告提示词。
+报告生成被封装成一张显式的 LangGraph `StateGraph` 子图（`agent/report_graph.py`）：主智能体只需调用 `generate_usage_report` 工具，子图内部按固定流程「获取用户ID → 获取月份 → 检索使用记录 → 条件边(有记录?) → 生成报告 / 返回无记录提示」执行。相比让模型自主决定工具调用顺序，流程确定、状态可追踪。
 
 ```mermaid
 sequenceDiagram
     participant U as 用户
     participant A as ReactAgent
-    participant M as 中间件
-    participant T as 工具
+    participant G as 报告子图 StateGraph
+    participant T as 数据工具
     U->>A: "生成我的使用报告"
-    A->>T: get_user_id / get_current_month
-    A->>T: fill_context_for_report
-    T->>M: monitor_tool 捕获该工具调用
-    M->>M: context["report"] = True
-    A->>T: fetch_external_data(user_id, month)
-    Note over A,M: 下一次模型调用前<br/>report_prompt_switch 切换为报告提示词
-    A->>U: 生成 Markdown 使用报告与建议
+    A->>G: 调用 generate_usage_report
+    G->>T: get_user_id → get_current_month
+    G->>T: fetch_external_data(user_id, month)
+    alt 有使用记录
+        G->>G: generate_report 生成报告
+    else 无记录
+        G->>G: no_record 返回提示
+    end
+    G->>A: 返回报告文本
+    A->>U: 原样输出 Markdown 使用报告与建议
 ```
 
 ## 技术栈
@@ -80,7 +94,11 @@ sequenceDiagram
 | 向量数据库 | Chroma |
 | 检索增强 | RecursiveCharacterTextSplitter + 粗召回 Retriever + rerank 精排 + 总结链 |
 | 会话存储 | SQLite（标准库 `sqlite3`，零额外依赖） |
+| 工具协议 | MCP（`mcp` Python SDK，stdio 传输） |
+| 外部数据 | Open-Meteo（天气，免 Key） |
 | Web 界面 | Streamlit |
+| API 服务 | FastAPI + Uvicorn（SSE 流式输出） |
+| 部署 | Docker / Docker Compose |
 | 配置/提示词 | YAML 配置 + 独立提示词模板文件 |
 
 ## 项目结构
@@ -88,11 +106,15 @@ sequenceDiagram
 ```
 robot-vacuum-customer-service/
 ├── app.py                      # Streamlit 入口，聊天界面、会话侧边栏与流式输出
+├── api.py                      # FastAPI 入口：POST /chat（SSE）、会话 CRUD、/health
 ├── agent/
 │   ├── react_agent.py          # ReactAgent：装配模型/工具/中间件，流式执行（支持多轮历史）
+│   ├── report_graph.py         # 报告生成子图：显式 StateGraph 编排（状态/节点/条件边）
 │   └── tools/
-│       ├── agent_tools.py      # 7 个工具函数
-│       └── middleware.py       # 3 个中间件（监控/日志/提示词切换）
+│       ├── agent_tools.py      # 对外 4 个工具 + 报告子图复用的 3 个数据工具
+│       └── middleware.py       # 2 个中间件（工具监控/模型调用日志）
+├── mcp_server/
+│   └── weather_server.py       # MCP 天气服务（FastMCP + stdio，数据源 Open-Meteo）
 ├── model/
 │   └── factory.py              # 模型工厂：ChatModel + EmbeddingModel
 ├── rag/
@@ -103,6 +125,7 @@ robot-vacuum-customer-service/
 │   ├── prompt_loader.py        # 提示词加载
 │   ├── file_handler.py         # PDF/TXT 加载、MD5、目录遍历
 │   ├── logger_handler.py       # 统一日志
+│   ├── mcp_client.py           # MCP 客户端（独立线程跑 asyncio，调用 stdio 服务）
 │   ├── path_tool.py            # 项目绝对路径工具
 │   └── session_store.py        # SQLite 会话持久化（新建/加载/删除）
 ├── config/                     # YAML 配置（agent/rag/chroma/prompts）
@@ -111,6 +134,11 @@ robot-vacuum-customer-service/
 ├── data/                       # 知识库源文件（txt/pdf）+ 外部记录 csv + 会话库 sessions.db
 ├── docs/                       # 设计文档
 ├── requirements.txt
+├── Dockerfile                  # 单镜像同时可跑 API / UI
+├── docker-compose.yml          # api + ui 双服务，共享向量库卷
+├── docker-entrypoint.sh        # 容器启动时按需构建向量库
+├── .dockerignore               # 构建上下文排除虚拟环境/向量库/日志等
+├── .gitattributes              # 固定 *.sh 与 Dockerfile 为 LF 换行
 ├── .env.example
 ├── LICENSE
 └── README.md
@@ -159,6 +187,38 @@ streamlit run app.py
 
 > 提示：项目使用绝对导入且未包含 `__init__.py`，请在**项目根目录**运行；子模块用 `python -m rag.vector_store` 的模块方式执行，不要直接 `python rag/vector_store.py`。
 
+### API 服务（FastAPI）
+
+除 Streamlit 界面外，还提供 HTTP 接口（同一套智能体与会话存储）：
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/health` | 健康检查 |
+| `GET` | `/sessions` | 会话列表（按更新时间倒序） |
+| `DELETE` | `/sessions/{id}` | 删除会话 |
+| `POST` | `/chat` | 对话，SSE 流式返回 |
+
+`POST /chat` 首次不传 `session_id` 会自动建会话，并通过 `event: session` 返回新 ID；正文以 `data:` 逐块推送，结束发送 `event: done` + `[DONE]`：
+
+```bash
+curl -N -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"我所在地区该怎么保养扫地机器人？"}'
+```
+
+### Docker Compose 一键启动
+
+```bash
+export DASHSCOPE_API_KEY="sk-你的key"   # Windows PowerShell: $env:DASHSCOPE_API_KEY="sk-你的key"
+docker compose up --build
+```
+
+启动后 UI 在 `http://localhost:8501`、API 在 `http://localhost:8000`。两个服务共享命名卷中的 Chroma 向量库；入口脚本会在库缺失时自动构建一次。UI 依赖 API 的健康检查通过后再启动。
+
 ## 配置说明
 
 所有配置集中在 `config/`，与代码解耦：
@@ -191,23 +251,25 @@ python -m evals.run_eval --with-answer  # 额外评估答案关键词覆盖率�
 | 场景 | 示例提问 | 触发链路 |
 |---|---|---|
 | 选购咨询 | 「小户型适合哪些扫地机器人？」 | `rag_summarize` 检索知识库 |
-| 环境适配 | 「我所在地区的气温下该如何保养？」 | `get_city_name` → `get_weather` → 综合作答 |
-| 使用报告 | 「生成我的使用报告」 | `fill_context_for_report` → 提示词切换 → `fetch_external_data` |
+| 环境适配 | 「我所在地区的气温下该如何保养？」 | `get_city_name` → `get_weather`（MCP 天气服务 / Open-Meteo）→ 综合作答 |
+| 使用报告 | 「生成我的使用报告」 | `generate_usage_report` → 报告子图 StateGraph（取用户/月份 → 取记录 → 生成报告） |
 | 多轮追问 | 「（承接上文）那适合养宠家庭吗？」 | 既往对话作为上下文传入 Agent |
 
 ## 说明与已知限制
 
-本项目为学习/演示性质，以下工具为**模拟实现**，真实部署需替换为对应服务：
+本项目为学习/演示性质，真实天气已通过 MCP 接入 Open-Meteo，但以下部分仍为**模拟实现**，真实部署需替换为对应服务：
 
-- `get_weather`：返回固定天气数据；
-- `get_city_name` / `get_user_id` / `get_current_month`：随机返回演示值；
+- `get_city_name` / `get_user_id` / `get_current_month`：随机返回演示值（应替换为用户/设备系统）；
 - `fetch_external_data`：读取本地 `records.csv` 演示数据。
 
-此外，当前版本面向单机单用户、无鉴权；会话已持久化到本地 SQLite（`data/sessions.db`），支持跨刷新/重启加载；API Key 通过环境变量读取（未内置 `.env` 自动加载）。
+此外，当前版本面向单机单用户、**API 无鉴权**；会话已持久化到本地 SQLite（`data/sessions.db`），支持跨刷新/重启加载；API Key 通过环境变量读取（未内置 `.env` 自动加载）。MCP 天气依赖外网访问 Open-Meteo，不可用时 `get_weather` 会降级返回提示而不中断对话。
 
 ## 后续规划
 
-- [ ] 接入真实天气 API 与用户/设备系统
+- [x] 接入真实天气（MCP 天气服务 + Open-Meteo）
+- [x] 报告流程显式图编排（LangGraph StateGraph）
+- [x] FastAPI 接口（SSE 流式）+ Docker Compose 部署
+- [ ] 接入真实用户/设备系统
 - [ ] `.env` 自动加载、多用户隔离与鉴权
 - [ ] 单元测试与 CI
 - [x] 检索重排（rerank）

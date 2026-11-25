@@ -1,14 +1,15 @@
 # ========================智能客服工具模块========================
 """
 agent工具调用模块：
-    7个工具函数：
-        1. rag_summarize：模型总结向量库中的内容
+    对外（主智能体可调用）4个工具：
+        1. rag_summarize：从向量库检索并总结资料
         2. get_weather：获取指定城市的天气
         3. get_city_name：获取用户所在城市的名称
-        4. get_user_id：获取用户id
-        5. get_current_month：获取当前月份
-        6. fetch_external_data：从外部系统中，获取指定用户在指定月份的使用记录
-        7. fill_context_for_report：是否需根据场景切换提示词
+        4. generate_usage_report：生成/查询个人使用报告（内部走报告子图）
+    报告子图内部复用（不直接暴露给模型）3个数据工具：
+        get_user_id：获取用户id
+        get_current_month：获取当前月份
+        fetch_external_data：从外部系统获取指定用户指定月份的使用记录
 """
 
 import os.path
@@ -17,6 +18,7 @@ from rag.rag_service import RagSummarizeService
 from langchain_core.tools import tool
 from utils.cofig_handler import agent_conf
 from utils.logger_handler import logger
+from utils.mcp_client import run_mcp_tool
 from utils.path_tool import get_abspath
 
 user_ids = [
@@ -54,10 +56,18 @@ def rag_summarize(query: str) -> str:
     return RagSummarizeService().rag_summarize(query)
 
 
-# 以下 get_weather/get_city_name/get_user_id/get_current_month 为演示用模拟数据（固定或随机返回），非真实查询
-@tool(description="获取指定城市的天气，以消息字符串的形式返回")
+# get_city_name/get_user_id/get_current_month 为演示用模拟数据（随机返回），非真实查询
+@tool(
+    description="获取指定城市的实时天气（通过 MCP 天气服务，数据来源 Open-Meteo），以字符串返回"
+)
 def get_weather(city: str) -> str:
-    return f"{city}的天气为晴天，气温为25摄氏度，空气湿度为60%，南风1级，AQI21，最近6小时无雨"
+    # 通过独立 MCP 天气服务获取真实天气；服务不可用时降级为提示，避免打断对话
+    server_script = get_abspath("mcp_server/weather_server.py")
+    try:
+        return run_mcp_tool(server_script, "get_weather", {"city": city})
+    except Exception as e:
+        logger.error(f"[get_weather] MCP 天气服务调用失败：{e}")
+        return f"{city}的天气信息暂时获取失败（天气服务不可用）。"
 
 
 @tool(description="获取用户所在城市的名称，以字符串的形式返回")
@@ -126,11 +136,19 @@ def fetch_external_data(user_id: str, month: str) -> dict:
 
 
 @tool(
-    description="无入参，无返回值，调用后触发中间件自动为报告生成的场景动态注入上下文信息，为后续提示词切换上下文信息"
+    description=(
+        "生成或查询用户本月的扫地机器人使用报告与保养建议。"
+        "内部会自动完成：获取用户ID→获取当前月份→检索使用记录→生成报告。"
+        "当用户明确要求「生成/查询我的使用报告、使用记录」时调用；"
+        "调用后请将返回的报告内容原样作为最终回答输出，不要改写、概括或补充。"
+    )
 )
-def fill_context_for_report():
-    return "fill_context_for_report已调用"
+def generate_usage_report() -> str:
+    # 延迟导入报告子图，避免与 report_graph 形成循环依赖
+    from agent.report_graph import run_report
+
+    return run_report()
 
 
 if __name__ == "__main__":
-    print(fetch_external_data("1001", "2025-02"))
+    print(fetch_external_data.invoke({"user_id": "1001", "month": "2025-02"}))

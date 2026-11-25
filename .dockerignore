@@ -1,0 +1,12 @@
+.venv/
+chroma_db/
+logs/
+.git/
+.idea/
+__pycache__/
+*.pyc
+data/sessions.db
+evals/results/
+md5*.text
+.env
+*.log
